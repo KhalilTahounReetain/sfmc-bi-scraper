@@ -2,8 +2,9 @@
 """
 BI XML to CSV Converter for SFMC
 =================================
-Downloads PartenaireBI.xml from SFMC Enhanced FTP, parses PROGRAMME blocks,
-converts to CSV, uploads to /Import/ on the same FTP.
+Downloads PartenaireBI.xml from SFMC Enhanced FTP, parses PROGRAMME blocks
+using the EXACT same logic as the CloudPage, converts to CSV, uploads to
+/Import/ on the same FTP.
 
 SFMC Import Activity picks up the CSV automatically.
 
@@ -15,7 +16,6 @@ import csv
 import os
 import re
 import sys
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from io import BytesIO, StringIO
 
@@ -48,115 +48,231 @@ CSV_COLUMNS = [
 ]
 
 # =============================================================================
-# XML PARSING
+# XML HELPERS — Mirrors the CloudPage SSJS logic exactly using string ops
+#               (not ElementTree) to behave identically to the SSJS version
 # =============================================================================
 
-def clean_text(text):
-    if not text:
+def decode_xml(v):
+    """Exact port of the CloudPage decodeXml() function."""
+    if not v:
         return ""
-    text = re.sub(r"<[^>]*>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    v = re.sub(r"<!\[CDATA\[([\s\S]*?)\]\]>", r"\1", v)
+    v = v.replace("&lt;", "<").replace("&gt;", ">")
+    v = v.replace("&amp;", "&").replace("&quot;", '"')
+    v = v.replace("&#39;", "'")
+    v = re.sub(r"\s+", " ", v).strip()
+    return v
 
-def get_tag_text(element, tag):
-    el = element.find(tag)
-    if el is not None and el.text:
-        return clean_text(el.text)
-    return ""
 
-def get_program_url(el, raw_block):
-    for url_el in el.iter("URL"):
-        if url_el.text and "/programme-neuf-" in url_el.text:
-            return url_el.text.strip()
-    match = re.search(r"<URL>\s*(.*?/programme-neuf-[^<]*)\s*</URL>", raw_block)
-    if match:
-        return match.group(1).strip()
-    return ""
+def tag_value(xml, tag):
+    """Exact port of the CloudPage tagValue() function."""
+    o = f"<{tag}>"
+    c = f"</{tag}>"
+    s = xml.find(o)
+    if s < 0:
+        return ""
+    s += len(o)
+    e = xml.find(c, s)
+    if e < 0:
+        return ""
+    return decode_xml(xml[s:e])
 
-def get_points_forts(el):
-    pf_block = el.find("POINTS_FORTS")
-    if pf_block is None:
+
+def all_tag_values(xml, tag):
+    """Exact port of the CloudPage allTagValues() function."""
+    out = []
+    o = f"<{tag}>"
+    c = f"</{tag}>"
+    p = 0
+    while True:
+        s = xml.find(o, p)
+        if s < 0:
+            break
+        s += len(o)
+        e = xml.find(c, s)
+        if e < 0:
+            break
+        out.append(decode_xml(xml[s:e]))
+        p = e + len(c)
+    return out
+
+
+def get_program_url(program_xml):
+    """Exact port of the CloudPage getProgramUrl() function.
+    Finds /programme-neuf- marker first, then searches backwards for <URL> tag."""
+    marker = "/programme-neuf-"
+    hit = program_xml.find(marker)
+    if hit < 0:
+        return ""
+    # Search backwards from the marker to find the enclosing <URL>
+    s = program_xml.rfind("<URL>", 0, hit)
+    if s < 0:
+        return ""
+    s += 5  # len("<URL>")
+    e = program_xml.find("</URL>", s)
+    if e < 0:
+        return ""
+    return decode_xml(program_xml[s:e])
+
+
+def get_points_forts(program_xml):
+    """Exact port of the CloudPage getPointsForts() function."""
+    s = program_xml.find("<POINTS_FORTS>")
+    if s < 0:
         return []
-    return [clean_text(pf.text) for pf in pf_block.findall("PF") if pf.text]
+    e = program_xml.find("</POINTS_FORTS>", s)
+    if e < 0:
+        return []
+    block = program_xml[s:e + 15]
+    return all_tag_values(block, "PF")
 
-def build_arguments(el, name):
-    pfs = get_points_forts(el)
+
+def clean_text(v):
+    """Exact port of the CloudPage cleanText() function."""
+    v = decode_xml(v or "")
+    v = re.sub(r"<[^>]*>", " ", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    return v
+
+
+def build_program_arguments(program_xml, program_name):
+    """Exact port of the CloudPage buildProgramArguments() function."""
+    pfs = get_points_forts(program_xml)
     if pfs:
-        return " | ".join(pfs)
-    for tag in ["PROMESSE_PROGRAMME", "DESCRIPTIF_COURT", "DESCRIPTIF_LONG",
-                "DESCRIPTIF_CENTRE_D_APPEL"]:
-        val = get_tag_text(el, tag)
-        if val:
-            return val
-    return name if name else "N/A"
+        return clean_text(" | ".join(pfs))
 
-def get_program_image(el):
-    persp = el.find("PERSPECTIVES")
-    if persp is None:
+    candidates = [
+        tag_value(program_xml, "PROMESSE_PROGRAMME"),
+        tag_value(program_xml, "DESCRIPTIF_COURT"),
+        tag_value(program_xml, "DESCRIPTIF_LONG"),
+        tag_value(program_xml, "DESCRIPTIF_CENTRE_D_APPEL"),
+        program_name,
+    ]
+    for c in candidates:
+        cleaned = clean_text(c)
+        if cleaned:
+            return cleaned
+    return "N/A"
+
+
+def get_program_image(program_xml):
+    """Exact port of the CloudPage getProgramImage() function.
+    Searches inside <PERSPECTIVES> block for ALL <URL> tags at any depth."""
+    s = program_xml.find("<PERSPECTIVES>")
+    if s < 0:
         return "NO IMAGE"
-    for url_el in persp.findall("URL"):
-        if url_el.text and url_el.text.strip():
-            return url_el.text.strip()
+    e = program_xml.find("</PERSPECTIVES>", s)
+    if e < 0:
+        return "NO IMAGE"
+    block = program_xml[s:e + 15]
+    urls = all_tag_values(block, "URL")
+    if urls and urls[0]:
+        return urls[0]
     return "NO IMAGE"
 
-def parse_xml(xml_content):
-    xml_content = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', xml_content, flags=re.DOTALL)
-    blocks = re.findall(r"<PROGRAMME>(.*?)</PROGRAMME>", xml_content, re.DOTALL)
-    print(f"[PARSE] Found {len(blocks)} PROGRAMME blocks")
 
+def cut(v, n):
+    """Exact port of the CloudPage cut() function."""
+    v = v or ""
+    return v[:n] if len(v) > n else v
+
+
+# =============================================================================
+# MAIN PARSER — Exact port of the CloudPage scrape() function
+# =============================================================================
+
+def parse_xml(raw):
+    """Parse XML using identical logic to the CloudPage."""
+
+    # Safety cut at </REPONSE>
+    end = raw.find("</REPONSE>")
+    if end > -1:
+        raw = raw[:end + 10]
+
+    dedup = {}
     programs = []
-    seen = set()
+    scanned = 0
     skipped = 0
+    dup_skipped = 0
 
-    for block_content in blocks:
-        raw_block = f"<PROGRAMME>{block_content}</PROGRAMME>"
-        try:
-            el = ET.fromstring(raw_block)
-        except ET.ParseError:
-            try:
-                el = ET.fromstring(f"<root>{raw_block}</root>").find("PROGRAMME")
-            except ET.ParseError:
-                skipped += 1
-                continue
+    open_tag = "<PROGRAMME>"
+    close_tag = "</PROGRAMME>"
+    block_start = 0
 
-        ref  = get_tag_text(el, "REF_OPERATION") or get_tag_text(el, "NUMERO")
-        name = get_tag_text(el, "NOM")
-        city = get_tag_text(el, "VILLE")
-        zip_ = get_tag_text(el, "CP")
-        dept = get_tag_text(el, "DEPARTEMENT")
-        url  = get_program_url(el, raw_block)
+    while True:
+        ps = raw.find(open_tag, block_start)
+        if ps < 0:
+            break
+        pe = raw.find(close_tag, ps)
+        if pe < 0:
+            break
+        pe += len(close_tag)
+        block_start = pe
+        scanned += 1
 
-        if not all([ref, name, city, zip_, dept, url]):
+        p = raw[ps:pe]
+
+        program_ref = tag_value(p, "REF_OPERATION")
+        if not program_ref:
+            program_ref = tag_value(p, "NUMERO")
+
+        program_name = tag_value(p, "NOM")
+        city         = tag_value(p, "VILLE")
+        zip_code     = tag_value(p, "CP")
+        dept         = tag_value(p, "DEPARTEMENT")
+        program_url  = get_program_url(p)
+
+        program_arguments = build_program_arguments(p, program_name)
+        program_image     = get_program_image(p)
+        scraping_date     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Same filters as CloudPage
+        if not all([program_ref, program_name, city, zip_code, dept, program_url]):
+            skipped += 1
+            if scanned <= 5:
+                missing = []
+                if not program_ref: missing.append("ref")
+                if not program_name: missing.append("name")
+                if not city: missing.append("city")
+                if not zip_code: missing.append("zip")
+                if not dept: missing.append("dept")
+                if not program_url: missing.append("url")
+                print(f"[PARSE] SKIP #{scanned}: missing {', '.join(missing)}")
+            continue
+
+        if "/programme-neuf-" not in program_url:
             skipped += 1
             continue
-        if "/programme-neuf-" not in url:
-            skipped += 1
-            continue
 
-        key = f"{ref}||{url}"
-        if key in seen:
+        unique_key = f"{program_ref}||{program_url}"
+        if unique_key in dedup:
+            dup_skipped += 1
             continue
-        seen.add(key)
+        dedup[unique_key] = True
 
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Log first few for diagnostics
+        if len(programs) < 3:
+            print(f"[PARSE] Program #{len(programs)+1}: ref={program_ref} name={program_name} "
+                  f"city={city} image={program_image[:80]}")
 
         programs.append({
-            "Program_URL":        url[:500],
-            "Program_Ref":        ref[:50],
-            "Program_Name":       name[:255],
-            "Program_City":       city[:100],
-            "Program_ZipCode":    zip_[:10],
-            "Program_Department": dept[:2],
-            "Program_Arguments":  build_arguments(el, name)[:4000],
-            "Scraping_Date":      now_str,
+            "Program_URL":        cut(program_url, 500),
+            "Program_Ref":        cut(program_ref, 50),
+            "Program_Name":       cut(program_name, 255),
+            "Program_City":       cut(city, 100),
+            "Program_ZipCode":    cut(zip_code, 10),
+            "Program_Department": cut(dept, 2),
+            "Program_Arguments":  cut(program_arguments, 4000),
+            "Scraping_Date":      scraping_date,
             "Scraping_Status":    "SUCCESS",
             "Error_Message":      "",
-            "Program_Image":      (get_program_image(el) or "NO IMAGE")[:500],
+            "Program_Image":      cut(program_image or "NO IMAGE", 500),
         })
 
-    dups = len(blocks) - len(programs) - skipped
-    print(f"[PARSE] Valid: {len(programs)}, Skipped: {skipped}, Duplicates: {dups}")
+    print(f"[PARSE] Scanned: {scanned}, Valid: {len(programs)}, "
+          f"Skipped: {skipped}, Duplicates: {dup_skipped}")
     return programs
+
 
 # =============================================================================
 # CSV
@@ -172,6 +288,7 @@ def programs_to_csv(programs):
     print(f"[CSV] Generated {len(programs)} rows, {len(csv_str):,} bytes")
     return csv_str
 
+
 # =============================================================================
 # FTP
 # =============================================================================
@@ -183,6 +300,7 @@ def ftp_connect():
     sftp = paramiko.SFTPClient.from_transport(transport)
     print("[FTP] Connected")
     return transport, sftp
+
 
 def ftp_list_dir(sftp, path):
     try:
@@ -196,13 +314,12 @@ def ftp_list_dir(sftp, path):
         print(f"[FTP] Cannot list '{path}': {e}")
         return []
 
+
 def ftp_find_xml(sftp):
     """Auto-discover the XML file on FTP with fallbacks."""
-
-    # Primary path (confirmed by user) + many fallbacks
     paths_to_try = [
-        "/import/bi/PartenaireBI.xml",       # confirmed full path
-        "/Import/bi/PartenaireBI.xml",       # case variation
+        "/import/bi/PartenaireBI.xml",
+        "/Import/bi/PartenaireBI.xml",
         "/import/PartenaireBI.xml",
         "/Import/PartenaireBI.xml",
         "/bi/PartenaireBI.xml",
@@ -215,7 +332,6 @@ def ftp_find_xml(sftp):
         "PartenaireBI.xml",
     ]
 
-    # Quick check: try all known paths first
     for path in paths_to_try:
         try:
             stat = sftp.stat(path)
@@ -224,14 +340,8 @@ def ftp_find_xml(sftp):
         except (FileNotFoundError, IOError):
             continue
 
-    # None of the known paths worked — explore the FTP to find it
-    print("[FTP] Known paths failed. Exploring FTP structure...")
-    root_items = ftp_list_dir(sftp, ".")
-    if not root_items:
-        root_items = ftp_list_dir(sftp, "/")
-
-    # Recursively search up to 3 levels deep
-    searched = []
+    # Explore FTP to find it
+    print("[FTP] Known paths failed. Scanning FTP...")
     dirs_to_scan = ["."]
     for depth in range(3):
         next_dirs = []
@@ -239,7 +349,6 @@ def ftp_find_xml(sftp):
             items = ftp_list_dir(sftp, d)
             for item in items:
                 child = f"{d}/{item.filename}" if d != "." else item.filename
-                # Check if this is our file
                 if item.filename.lower() == FILENAME.lower():
                     try:
                         stat = sftp.stat(child)
@@ -247,16 +356,12 @@ def ftp_find_xml(sftp):
                         return child
                     except (FileNotFoundError, IOError):
                         pass
-                # Queue subdirectories for next scan
                 if item.longname.startswith("d"):
                     next_dirs.append(child)
-            searched.append(d)
         dirs_to_scan = next_dirs
 
-    raise FileNotFoundError(
-        f"Could not find {FILENAME} anywhere on FTP. "
-        f"Directories searched: {searched}"
-    )
+    raise FileNotFoundError(f"Could not find {FILENAME} anywhere on FTP.")
+
 
 def ftp_download(sftp, path):
     print(f"[FTP] Downloading {path}...")
@@ -266,8 +371,8 @@ def ftp_download(sftp, path):
     print(f"[FTP] Downloaded {len(content):,} characters")
     return content
 
+
 def ftp_upload(sftp, path, content):
-    # Ensure parent directories exist
     parts = path.strip("/").split("/")
     for i in range(len(parts) - 1):
         dir_path = "/" + "/".join(parts[:i+1])
@@ -284,6 +389,7 @@ def ftp_upload(sftp, path, content):
     buffer = BytesIO(content.encode("utf-8"))
     sftp.putfo(buffer, path)
     print(f"[FTP] Upload complete ({len(content):,} bytes)")
+
 
 # =============================================================================
 # MAIN
@@ -304,13 +410,13 @@ def main():
     transport, sftp = ftp_connect()
 
     try:
-        # Step 1: Find the XML (auto-discover with fallbacks)
+        # Step 1: Find the XML
         xml_path = ftp_find_xml(sftp)
 
         # Step 2: Download
         xml_content = ftp_download(sftp, xml_path)
 
-        # Step 3: Parse
+        # Step 3: Parse (same logic as CloudPage)
         programs = parse_xml(xml_content)
         if not programs:
             print("[DONE] No valid programs. No CSV created.")
