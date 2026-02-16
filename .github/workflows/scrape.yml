@@ -1,12 +1,11 @@
 name: BI XML → SFMC CSV
 
 on:
-  # Daily schedule — adjust the time to run AFTER the partner drops the file
-  # This example runs at 7:00 AM UTC every day
+  # Poll every 30 minutes — only processes if XML changed
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "*/30 * * * *"
 
-  # Manual trigger (click "Run workflow" in GitHub UI anytime)
+  # Manual trigger anytime
   workflow_dispatch:
 
 jobs:
