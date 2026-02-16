@@ -1,0 +1,33 @@
+name: BI XML → SFMC CSV
+
+on:
+  # Daily schedule — adjust the time to run AFTER the partner drops the file
+  # This example runs at 7:00 AM UTC every day
+  schedule:
+    - cron: "0 7 * * *"
+
+  # Manual trigger (click "Run workflow" in GitHub UI anytime)
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install paramiko
+
+      - name: Run XML → CSV converter
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: python xml_to_csv_ftp.py
