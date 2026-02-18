@@ -1,9 +1,7 @@
 name: BI XML → SFMC CSV
 
 on:
-  # Poll every 30 minutes — only processes if XML changed
-  schedule:
-    - cron: "*/30 * * * *"
+  
 
   # Manual trigger anytime
   workflow_dispatch:
