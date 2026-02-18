@@ -32,8 +32,8 @@ INCOMING_DIR  = os.environ.get("INCOMING_DIR",  "/bi/incoming")
 ARCHIVE_DIR   = os.environ.get("ARCHIVE_DIR",   "/bi/archive")
 PROCESSED_LOG = os.environ.get("PROCESSED_LOG", "/bi/processed/processed.log")
 
-# NOTE: Using the actual External Key from your screenshot
-DE_EXTERNAL_KEY = "3S8E9826-DCC3-4611-98F1-233E639B96D3"
+# NOTE: Correct External Key from SFMC
+DE_EXTERNAL_KEY = "358E9826-DCC9-4611-98F1-233E639B96D3"
 BATCH_SIZE = 50
 
 XML_PATTERN = re.compile(r".*\.xml$", re.IGNORECASE)
