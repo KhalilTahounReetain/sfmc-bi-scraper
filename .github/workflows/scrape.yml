@@ -1,14 +1,18 @@
 name: BI XML → SFMC CSV
 
 on:
-  
+  repository_dispatch:
+    types: [xml-uploaded]
 
-  # Manual trigger anytime
   workflow_dispatch:
+
+  schedule:
+    - cron: "*/30 * * * *"
 
 jobs:
   convert:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,12 +23,19 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install paramiko
+        run: pip install paramiko requests
 
-      - name: Run XML → CSV converter
+      - name: Run XML → DE pipeline
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          SFMC_CLIENT_ID: ${{ secrets.SFMC_CLIENT_ID }}
+          SFMC_CLIENT_SECRET: ${{ secrets.SFMC_CLIENT_SECRET }}
+          SFMC_AUTH_BASE_URI: ${{ secrets.SFMC_AUTH_BASE_URI }}
+          SFMC_REST_BASE_URI: ${{ secrets.SFMC_REST_BASE_URI }}
+          INCOMING_DIR: /bi/incoming
+          ARCHIVE_DIR: /bi/archive
+          PROCESSED_LOG: /bi/processed/processed.log
         run: python xml_to_csv_ftp.py
