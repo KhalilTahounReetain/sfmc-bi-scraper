@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
 """
-BI XML → SFMC Data Extension (Full Pipeline)
-=============================================
-1. Connects to SFMC Enhanced FTP via SFTP
-2. Downloads new XML files from /bi/incoming
-3. Parses PROGRAMME blocks (CloudPage-identical logic)
-4. Upserts rows directly to the DE via SFMC REST API
-5. Archives processed XML to /bi/archive
-
-No Import Activity, no File Drop, no CSV. Python does everything.
-
-Requirements: pip install paramiko requests
+BI XML → SFMC Data Extension (Full Pipeline) - ASYNC API VERSION
+================================================================
+Uses the async Data Extension API which doesn't require primary key specification
 """
 
 import os
@@ -23,7 +15,7 @@ import paramiko
 import requests
 
 # =============================================================================
-# CONFIG — all from GitHub Secrets / env vars
+# CONFIG
 # =============================================================================
 
 FTP_HOST     = os.environ.get("FTP_HOST", "")
@@ -40,7 +32,8 @@ INCOMING_DIR  = os.environ.get("INCOMING_DIR",  "/bi/incoming")
 ARCHIVE_DIR   = os.environ.get("ARCHIVE_DIR",   "/bi/archive")
 PROCESSED_LOG = os.environ.get("PROCESSED_LOG", "/bi/processed/processed.log")
 
-DE_EXTERNAL_KEY = "BI_AVP_Program_Scraped_Data"
+# NOTE: Using the actual External Key from your screenshot
+DE_EXTERNAL_KEY = "3S8E9826-DCC3-4611-98F1-233E639B96D3"
 BATCH_SIZE = 50
 
 XML_PATTERN = re.compile(r".*\.xml$", re.IGNORECASE)
@@ -93,14 +86,18 @@ def ftp_write_text(sftp, path, content):
         f.write(content.encode("utf-8"))
 
 def load_processed(sftp):
+    """Load processed files as a set of 'filename|size|mtime' keys"""
     content = ftp_read_text(sftp, PROCESSED_LOG)
     return set(line.strip() for line in content.splitlines() if line.strip())
 
-def mark_processed(sftp, filename):
+def mark_processed(sftp, filename, size, mtime):
+    """Mark file as processed using filename|size|mtime format"""
+    key = f"{filename}|{size}|{int(mtime)}"
     existing = ftp_read_text(sftp, PROCESSED_LOG)
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    ftp_write_text(sftp, PROCESSED_LOG, existing + filename + "\n")
+    ftp_write_text(sftp, PROCESSED_LOG, existing + key + "\n")
+    print(f"[LOG] Marked as processed: {key}")
 
 def list_incoming_xml(sftp):
     items = sftp.listdir_attr(INCOMING_DIR)
@@ -112,7 +109,7 @@ def list_incoming_xml(sftp):
     return files
 
 # =============================================================================
-# SFMC REST API
+# SFMC REST API - ASYNC VERSION
 # =============================================================================
 
 def sfmc_auth():
@@ -128,52 +125,52 @@ def sfmc_auth():
     print("[API] Authenticated")
     return token
 
-def sfmc_upsert_batch(token, rows):
-    """Upsert a batch of rows to the DE via REST API."""
-    url = f"https://{SFMC_REST_BASE_URI}/hub/v1/dataevents/key:{DE_EXTERNAL_KEY}/rowset"
+def sfmc_insert_batch_async(token, rows):
+    """Insert rows using the async Data Extension API"""
+    url = f"https://{SFMC_REST_BASE_URI}/data/v1/async/dataextensions/key:{DE_EXTERNAL_KEY}/rows"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
-    # Format rows for the SFMC rowset API
-    payload = []
+    # Format rows for the async API
+    payload = {
+        "items": []
+    }
+    
     for row in rows:
-        payload.append({
-            "keys": {
-                "Program_URL": row["Program_URL"]
-            },
-            "values": {
-                "Program_Ref": row["Program_Ref"],
-                "Program_Name": row["Program_Name"],
-                "Program_City": row["Program_City"],
-                "Program_ZipCode": row["Program_ZipCode"],
-                "Program_Department": row["Program_Department"],
-                "Program_Arguments": row["Program_Arguments"],
-                "Scraping_Date": row["Scraping_Date"],
-                "Scraping_Status": row["Scraping_Status"],
-                "Error_Message": row["Error_Message"],
-                "Program_Image": row["Program_Image"],
-            }
+        payload["items"].append({
+            "Program_URL": row["Program_URL"],
+            "Program_Ref": row["Program_Ref"],
+            "Program_Name": row["Program_Name"],
+            "Program_City": row["Program_City"],
+            "Program_ZipCode": row["Program_ZipCode"],
+            "Program_Department": row["Program_Department"],
+            "Program_Arguments": row["Program_Arguments"],
+            "Scraping_Date": row["Scraping_Date"],
+            "Scraping_Status": row["Scraping_Status"],
+            "Error_Message": row["Error_Message"],
+            "Program_Image": row["Program_Image"],
         })
 
     resp = requests.post(url, json=payload, headers=headers)
 
     if resp.status_code in (200, 201, 202):
+        print(f"[API] Batch accepted: {resp.status_code}")
         return len(rows), 0
     else:
         print(f"[API] Batch FAILED: HTTP {resp.status_code}")
         print(f"       {resp.text[:500]}")
         return 0, len(rows)
 
-def sfmc_upsert_all(token, programs):
-    """Upsert all rows in batches."""
+def sfmc_insert_all(token, programs):
+    """Insert all rows in batches using async API"""
     total_ok = 0
     total_err = 0
 
     for i in range(0, len(programs), BATCH_SIZE):
         batch = programs[i:i + BATCH_SIZE]
-        ok, err = sfmc_upsert_batch(token, batch)
+        ok, err = sfmc_insert_batch_async(token, batch)
         total_ok += ok
         total_err += err
         print(f"[API] Batch {i // BATCH_SIZE + 1}: {ok} OK, {err} errors")
@@ -182,7 +179,7 @@ def sfmc_upsert_all(token, programs):
     return total_ok, total_err
 
 # =============================================================================
-# XML HELPERS — Exact 1:1 port of CloudPage SSJS
+# XML HELPERS
 # =============================================================================
 
 def decode_xml(v):
@@ -294,7 +291,7 @@ def parse_xml(raw):
         dedup[key] = True
 
         if len(programs) < 3:
-            print(f"[PARSE] #{len(programs)+1}: ref={ref} name={name} image={get_program_image(p)[:60]}")
+            print(f"[PARSE] #{len(programs)+1}: ref={ref} name={name}")
 
         programs.append({
             "Program_URL":        cut(url, 500),
@@ -319,7 +316,7 @@ def parse_xml(raw):
 
 def main():
     print("=" * 60)
-    print(f"[START] BI XML → SFMC DE | {datetime.now()}")
+    print(f"[START] BI XML → SFMC DE (ASYNC) | {datetime.now()}")
     print("=" * 60)
 
     # Validate config
@@ -333,6 +330,8 @@ def main():
         print(f"ERROR: Missing secrets: {', '.join(missing)}")
         sys.exit(1)
 
+    print(f"[CONFIG] DE External Key: {DE_EXTERNAL_KEY}")
+
     # Connect FTP
     transport, sftp = ftp_connect()
 
@@ -345,14 +344,22 @@ def main():
         incoming = list_incoming_xml(sftp)
         print(f"[INCOMING] Found {len(incoming)} XML file(s)")
 
-        to_process = [f for f in incoming if f[0] not in processed]
+        # Filter out already processed files
+        to_process = []
+        for filename, mtime, size in incoming:
+            key = f"{filename}|{size}|{int(mtime)}"
+            if key not in processed:
+                to_process.append((filename, mtime, size))
+            else:
+                print(f"[SKIP] Already processed: {filename}")
+
         print(f"[TODO] New: {len(to_process)}")
 
         if not to_process:
             print("[DONE] Nothing new.")
             return
 
-        # Authenticate to SFMC (once for all files)
+        # Authenticate to SFMC
         token = sfmc_auth()
 
         for filename, mtime, size in to_process:
@@ -367,15 +374,15 @@ def main():
             programs = parse_xml(xml_content)
             if not programs:
                 print("[WARN] No valid programs. Marking as processed.")
-                mark_processed(sftp, filename)
+                mark_processed(sftp, filename, size, mtime)
                 continue
 
-            # Upsert to DE via REST API
-            ok, err = sfmc_upsert_all(token, programs)
-            print(f"[RESULT] {ok} rows inserted, {err} errors")
+            # Insert to DE via async API
+            ok, err = sfmc_insert_all(token, programs)
+            print(f"[RESULT] {ok} rows submitted, {err} errors")
 
             # Mark processed
-            mark_processed(sftp, filename)
+            mark_processed(sftp, filename, size, mtime)
 
             # Archive XML
             archive_path = safe_join(ARCHIVE_DIR, filename)
