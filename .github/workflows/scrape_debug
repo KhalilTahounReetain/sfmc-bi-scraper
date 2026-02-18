@@ -1,0 +1,30 @@
+name: DEBUG - BI XML Listing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install paramiko requests
+
+      - name: Debug FTP listing
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          INCOMING_DIR: /bi/incoming
+          PROCESSED_LOG: /bi/processed/processed.log
+        run: python xml_to_csv_ftp_debug.py
